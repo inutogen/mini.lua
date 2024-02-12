@@ -325,6 +325,212 @@ function fs.isDriveRoot(sPath)
     return fs.getDir(sPath) == ".." or fs.getDrive(sPath) ~= fs.getDrive(fs.getDir(sPath))
 end
 
+local details, values = {}, {}
+
+
+local function serializeImpl(t, tTracking, sIndent)
+    local sType = type(t)
+    if sType == "table" then
+        if tTracking[t] ~= nil then
+            error("Cannot serialize table with recursive entries", 0)
+        end
+        tTracking[t] = true
+
+        if next(t) == nil then
+            -- Empty tables are simple
+            return "{}"
+        else
+            -- Other tables take more work
+            local sResult = "{\n"
+            local sSubIndent = sIndent .. "  "
+            local tSeen = {}
+            for k, v in ipairs(t) do
+                tSeen[k] = true
+                sResult = sResult .. sSubIndent .. serializeImpl(v, tTracking, sSubIndent) .. ",\n"
+            end
+            for k, v in pairs(t) do
+                if not tSeen[k] then
+                    local sEntry
+                    if type(k) == "string" and not g_tLuaKeywords[k] and string.match(k, "^[%a_][%a%d_]*$") then
+                        sEntry = k .. " = " .. serializeImpl(v, tTracking, sSubIndent) .. ",\n"
+                    else
+                        sEntry = "[ " .. serializeImpl(k, tTracking, sSubIndent) .. " ] = " .. serializeImpl(v, tTracking, sSubIndent) .. ",\n"
+                    end
+                    sResult = sResult .. sSubIndent .. sEntry
+                end
+            end
+            sResult = sResult .. sIndent .. "}"
+            return sResult
+        end
+
+    elseif sType == "string" then
+        return string.format("%q", t)
+
+    elseif sType == "number" or sType == "boolean" or sType == "nil" then
+        return tostring(t)
+
+    else
+        error("Cannot serialize type " .. sType, 0)
+
+    end
+end
+
+function textutils.serialize(t)
+    local tTracking = {}
+    return serializeImpl(t, tTracking, "")
+end
+
+function textutils.unserialize(s)
+    expect(1, s, "string")
+    local func = load("return " .. s, "unserialize", "t", {})
+    if func then
+        local ok, result = pcall(func)
+        if ok then
+            return result
+        end
+    end
+    return nil
+end
+
+local function settings.reserialize(value)
+    if type(value) ~= "table" then return value end
+    return textutils.unserialize(textutils.serialize(value))
+end
+
+local function settings.copy(value)
+    if type(value) ~= "table" then return value end
+    local result = {}
+    for k, v in pairs(value) do result[k] = copy(v) end
+    return result
+end
+
+local valid_types = { "number", "string", "boolean", "table" }
+for _, v in ipairs(valid_types) do valid_types[v] = true end
+
+function settings.define(name, options)
+    if options then
+        options = {
+            description = field(options, "description", "string", "nil"),
+            default = reserialize(field(options, "default", "number", "string", "boolean", "table", "nil")),
+            type = field(options, "type", "string", "nil"),
+        }
+
+        if options.type and not valid_types[options.type] then
+            error(("Unknown type %q. Expected one of %s."):format(options.type, table.concat(valid_types, ", ")), 2)
+        end
+    else
+        options = {}
+    end
+
+    details[name] = options
+end
+
+function settings.undefine(name)
+    details[name] = nil
+end
+
+local function settings.set_value(name, value)
+    local new = reserialize(value)
+    local old = values[name]
+    if old == nil then
+        local opt = details[name]
+        old = opt and opt.default
+    end
+
+    values[name] = new
+    if old ~= new then
+        os.queueEvent("setting_changed", name, new, old)
+    end
+end
+
+function settings.set(name, value)
+    local opt = details[name]
+    if opt and opt.type then expect(2, value, opt.type) end
+
+    set_value(name, value)
+end
+
+function settings.get(name, default)
+    local result = values[name]
+    if result ~= nil then
+        return copy(result)
+    elseif default ~= nil then
+        return default
+    else
+        local opt = details[name]
+        return opt and copy(opt.default)
+    end
+end
+
+function settings.getDetails(name)
+    local deets = copy(details[name]) or {}
+    deets.value = values[name]
+    deets.changed = deets.value ~= nil
+    if deets.value == nil then deets.value = deets.default end
+    return deets
+end
+
+function settings.unset(name)
+    set_value(name, nil)
+end
+
+function settings.clear()
+    for name in pairs(values) do
+        set_value(name, nil)
+    end
+end
+
+function settings.getNames()
+    local result, n = {}, 1
+    for k in pairs(details) do
+        result[n], n = k, n + 1
+    end
+    for k in pairs(values) do
+        if not details[k] then result[n], n = k, n + 1 end
+    end
+    table.sort(result)
+    return result
+end
+
+function settings.load(sPath)
+    local file = fs.open(sPath or ".settings", "r")
+    if not file then
+        return false
+    end
+
+    local sText = file.readAll()
+    file.close()
+
+    local tFile = textutils.unserialize(sText)
+    if type(tFile) ~= "table" then
+        return false
+    end
+
+    for k, v in pairs(tFile) do
+        local ty_v = type(v)
+        if type(k) == "string" and (ty_v == "string" or ty_v == "number" or ty_v == "boolean" or ty_v == "table") then
+            local opt = details[k]
+            if not opt or not opt.type or ty_v == opt.type then
+                set_value(k, v)
+            end
+        end
+    end
+
+    return true
+end
+
+function settings.save(sPath)
+    local file = fs.open(sPath or ".settings", "w")
+    if not file then
+        return false
+    end
+
+    file.write(textutils.serialize(values))
+    file.close()
+
+    return true
+end
+
 settings.define("bios.loadAPI", {
     default = true,
     description = "Load the APIs stored in /api/",
