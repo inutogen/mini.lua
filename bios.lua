@@ -77,6 +77,7 @@ function write(sText)
     end
 
     return nLinesPrinted
+end
 
 function print(...)
     local nLinesPrinted = 0
