@@ -1,5 +1,5 @@
 function os.version()
-  return "miniBIOS 0.0.dev-1"
+  return "miniBIOS 0.0.dev-4"
 end
 
 function os.pullEventRaw(s)
@@ -22,7 +22,6 @@ function sleep(n)
 end
 
 function write(sText)
-    expect(1, sText, "string", "number")
 
     local w, h = term.getSize()
     local x, y = term.getCursorPos()
@@ -392,12 +391,26 @@ function textutils.unserialize(s)
     return nil
 end
 
-local function settings.reserialize(value)
+local function field(tbl, index, ...)
+    local value = tbl[index]
+    local t = native_type(value)
+    for i = 1, native_select("#", ...) do
+        if t == native_select(i, ...) then return value end
+    end
+
+    if value == nil then
+        error(("field '%s' missing from table"):format(index), 3)
+    else
+        error(("bad field '%s' (expected %s, got %s)"):format(index, get_type_names(...), t), 3)
+    end
+end
+
+function settings.reserialize(value)
     if type(value) ~= "table" then return value end
     return textutils.unserialize(textutils.serialize(value))
 end
 
-local function settings.copy(value)
+function settings.copy(value)
     if type(value) ~= "table" then return value end
     local result = {}
     for k, v in pairs(value) do result[k] = copy(v) end
@@ -429,7 +442,7 @@ function settings.undefine(name)
     details[name] = nil
 end
 
-local function settings.set_value(name, value)
+function settings.set_value(name, value)
     local new = reserialize(value)
     local old = values[name]
     if old == nil then
